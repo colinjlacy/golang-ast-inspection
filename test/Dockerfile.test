@@ -1,0 +1,35 @@
+# Test application with embedded profiler
+
+# Build the test HTTP application
+FROM golang:1.21-alpine AS app-builder
+
+WORKDIR /app
+COPY test/app/simple-http-app.go ./
+RUN go build -o test-server simple-http-app.go
+
+# Build from profiler image
+FROM ubuntu:22.04
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy profiler binary (we'll build this separately)
+COPY --from=golang:1.21-alpine /usr/local/go /usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# Copy test application
+COPY --from=app-builder /app/test-server /usr/local/bin/test-server
+
+# Create traces directory
+RUN mkdir -p /traces
+
+# For MVP, we'll just run the test server
+# In production, you'd inject the profiler
+ENTRYPOINT ["/usr/local/bin/test-server"]
+
+# Note: To add profiling, you would:
+# 1. Copy the profiler binary and eBPF program
+# 2. Run profiler in background before starting test-server
+# 3. Add capabilities: --cap-add=SYS_ADMIN --cap-add=NET_ADMIN
+
