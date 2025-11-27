@@ -1,0 +1,48 @@
+services:
+  # Test HTTP application (without profiler for now)
+  test-app:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile.test
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./traces:/traces
+    networks:
+      - profiler-net
+    restart: unless-stopped
+
+  # Profiler (standalone - would attach to test-app in production)
+  profiler:
+    build:
+      context: ..
+      dockerfile: container/Dockerfile
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+      - BPF
+      - SYS_RESOURCE
+      - SYS_PTRACE
+    security_opt:
+      - apparmor=unconfined
+      - seccomp=unconfined
+    privileged: true  # Required for eBPF in some environments
+    volumes:
+      - ./traces:/traces
+      - /sys/kernel/debug:/sys/kernel/debug:rw
+      - /sys/kernel/tracing:/sys/kernel/tracing:rw
+      - /sys/fs/bpf:/sys/fs/bpf:rw
+    pid: "host"  # Share PID namespace to see all processes
+    networks:
+      - profiler-net
+    depends_on:
+      - test-app
+    restart: unless-stopped
+
+networks:
+  profiler-net:
+    driver: bridge
+
+volumes:
+  traces:
+

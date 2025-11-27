@@ -1,0 +1,40 @@
+# Binaries
+profiler
+*.o
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+
+# Output files
+*.txt
+container/traces/*
+
+# Go workspace
+/bin/
+/pkg/
+vendor/
+
+# Go build cache
+.cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# eBPF generated files
+*_bpf*.go
+*_bpf*.o
+
+# Docker
+.dockerignore
+
