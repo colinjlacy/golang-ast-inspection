@@ -15,7 +15,7 @@ container/traces/*
 
 # Go workspace
 /bin/
-/pkg/
+# /pkg/
 vendor/
 
 # Go build cache
@@ -36,5 +36,5 @@ vendor/
 *_bpf*.o
 
 # Docker
-.dockerignore
+# .dockerignore
 
