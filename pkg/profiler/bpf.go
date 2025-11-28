@@ -2,4 +2,4 @@
 
 package profiler
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -tags "ebpf_build" -cc clang -cflags "-O2 -g -D__TARGET_ARCH_x86" profiler ../../bpf/profiler.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -tags "ebpf_build" -cc clang -cflags "-O2 -g -D__TARGET_ARCH_arm64" profiler ../../bpf/profiler.bpf.c

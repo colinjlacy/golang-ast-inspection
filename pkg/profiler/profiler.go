@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/netip"
 	"os"
@@ -16,9 +17,11 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -60,8 +63,18 @@ func NewRunner(port uint16, outputPath string) *Runner {
 }
 
 func (r *Runner) Run(ctx context.Context) error {
-	if err := rlimit.RemoveMemlock(); err != nil {
-		return fmt.Errorf("removing memlock: %w", err)
+	if err := ensureMemlock(); err != nil {
+		return err
+	}
+
+	// Print the entirety of /proc/self/limits to the console
+	file, err := os.Open("/proc/self/limits")
+	if err != nil {
+		fmt.Printf("Failed to open /proc/self/limits: %v\n", err)
+	} else {
+		defer file.Close()
+		fmt.Println("=== /proc/self/limits ===")
+		io.Copy(os.Stdout, file)
 	}
 
 	var objs profilerObjects
@@ -71,7 +84,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	defer objs.Close()
 
 	links := []link.Link{}
-	add := func(l link.Link, err error) error {
+	attachTracepoint := func(category, name string, prog *ebpf.Program) error {
+		l, err := link.Tracepoint(category, name, prog, nil)
 		if err != nil {
 			return err
 		}
@@ -79,26 +93,26 @@ func (r *Runner) Run(ctx context.Context) error {
 		return nil
 	}
 
-	if err := add(link.Kprobe("__x64_sys_bind", objs.SysBind, nil)); err != nil {
-		return fmt.Errorf("attach bind: %w", err)
+	if err := attachTracepoint("syscalls", "sys_enter_bind", objs.TraceSysEnterBind); err != nil {
+		return fmt.Errorf("attach sys_enter_bind: %w", err)
 	}
-	if err := add(link.Kprobe("__x64_sys_connect", objs.SysConnect, nil)); err != nil {
-		return fmt.Errorf("attach connect: %w", err)
+	if err := attachTracepoint("syscalls", "sys_enter_connect", objs.TraceSysEnterConnect); err != nil {
+		return fmt.Errorf("attach sys_enter_connect: %w", err)
 	}
-	if err := add(link.Kprobe("__x64_sys_accept4", objs.SysAccept4Enter, nil)); err != nil {
-		return fmt.Errorf("attach accept4 enter: %w", err)
+	if err := attachTracepoint("syscalls", "sys_enter_accept4", objs.TraceSysEnterAccept4); err != nil {
+		return fmt.Errorf("attach sys_enter_accept4: %w", err)
 	}
-	if err := add(link.Kretprobe("__x64_sys_accept4", objs.SysAccept4Exit, nil)); err != nil {
-		return fmt.Errorf("attach accept4 exit: %w", err)
+	if err := attachTracepoint("syscalls", "sys_exit_accept4", objs.TraceSysExitAccept4); err != nil {
+		return fmt.Errorf("attach sys_exit_accept4: %w", err)
 	}
-	if err := add(link.Kprobe("__x64_sys_sendto", objs.SysSendto, nil)); err != nil {
-		return fmt.Errorf("attach sendto: %w", err)
+	if err := attachTracepoint("syscalls", "sys_enter_sendto", objs.TraceSysEnterSendto); err != nil {
+		return fmt.Errorf("attach sys_enter_sendto: %w", err)
 	}
-	if err := add(link.Kprobe("__x64_sys_recvfrom", objs.SysRecvfromEnter, nil)); err != nil {
-		return fmt.Errorf("attach recvfrom enter: %w", err)
+	if err := attachTracepoint("syscalls", "sys_enter_recvfrom", objs.TraceSysEnterRecvfrom); err != nil {
+		return fmt.Errorf("attach sys_enter_recvfrom: %w", err)
 	}
-	if err := add(link.Kretprobe("__x64_sys_recvfrom", objs.SysRecvfromExit, nil)); err != nil {
-		return fmt.Errorf("attach recvfrom exit: %w", err)
+	if err := attachTracepoint("syscalls", "sys_exit_recvfrom", objs.TraceSysExitRecvfrom); err != nil {
+		return fmt.Errorf("attach sys_exit_recvfrom: %w", err)
 	}
 
 	defer func() {
@@ -258,4 +272,19 @@ func ipFromBytes(family uint16, raw []byte) netip.Addr {
 	default:
 		return netip.Addr{}
 	}
+}
+
+func ensureMemlock() error {
+	const fallbackLimit = 256 << 20 // 256 MiB
+	if err := rlimit.RemoveMemlock(); err == nil {
+		return nil
+	}
+	lim := unix.Rlimit{
+		Cur: fallbackLimit,
+		Max: fallbackLimit,
+	}
+	if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, &lim); err != nil {
+		return fmt.Errorf("set memlock limit: %w", err)
+	}
+	return nil
 }

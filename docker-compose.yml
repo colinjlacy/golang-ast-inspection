@@ -17,10 +17,20 @@ services:
     environment:
       - HTTP_PORT=8080
       - OUTPUT_PATH=/output/ebpf_http.log
-    privileged: true
-    pid: host
+    # privileged: true
+    cap_add:
+      - IPC_LOCK
+      - SYS_RESOURCE
+      - SYS_ADMIN
+      - BPF
     security_opt:
+      - seccomp=unconfined
       - apparmor=unconfined
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    pid: host
     volumes:
       - ./output:/output
     depends_on:
