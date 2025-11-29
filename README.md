@@ -1,6 +1,8 @@
-# golang-ast-inspection
+# Golang HTTP Profiler
 
-Minimal eBPF-backed HTTP syscall profiler plus a tiny test service and traffic generator. Everything is wired for x86_64 Ubuntu (20/22/23) and Go 1.25.
+Minimal eBPF-backed HTTP syscall profiler written in Golang, plus a tiny test service and traffic generator. 
+
+**It currently only runs on Linux.** If you want to run it on a Mac, you'll need a VM. I could not get it working in a Linux container, although that could have something to do with the corporate security profile installed on my machine.
 
 ## What’s here
 - `cmd/server`: basic HTTP service on port 8080 with `/`, `/healthz`, `/echo`, `/slow`.
@@ -9,16 +11,31 @@ Minimal eBPF-backed HTTP syscall profiler plus a tiny test service and traffic g
 - `bpf/profiler.bpf.c`: BPF program (compiled via `bpf2go` during build).
 
 ## Setup (Ubuntu 20/22/23/25)
-- Go toolchain 1.25+ 
+
+There are probably better/smarter/faster/cooler ways to run this, but the way I pulled it off was to run a [Lima VM](https://lima-vm.io/) on my Mac. Note that I'm running on an ARM64 Mac, and I have not tested this on an x86 machine of any sort. Which means I also haven't tested it on a real Linux box.
+
+That said, if you'd like to run this:
+- If you're using a VM, SSH into that and clone this repo
+  - Lima will mount your host machine's home directory as read-only
+  - But! you need to generate the Go/C bindings for the eBPF functionality.
+  - So! don't rely on the mounted home directory if you've cloned this to your host machine
+- Install the Go toolchain 1.25+ 
+- Make sure you've got an OCI container runtime installed
+  - Most people would say "make sure you've got Docker installed"
+  - I used [nerdctl](https://github.com/containerd/nerdctl)
+  - [Podman](https://podman.io/) would also work.
 - Install C libraries (I had to sudo on a lima VM):
 ```sh
 sudo apt-get update
+# have not tested on x86, 
+# but I'd imagine you'll have less problems than I did
 sudo apt-get install -y --no-install-recommends \
     clang llvm make pkg-config libelf-dev zlib1g-dev linux-libc-dev libbpf-dev
 sudo rm -rf /var/lib/apt/lists/*
 ```
 - set up necessary symlink:
 ```sh
+# me and Claude trying to be arch-agnostic
 arch="$(uname -m)" && \
 case "${arch}" in \
     x86_64) multiarch="x86_64-linux-gnu" ;; \
@@ -30,23 +47,22 @@ ln -sf /usr/include/${multiarch}/asm /usr/include/asm
 - Set environment variables:
 ```sh
 export GOOS=linux
-export GOARCH=arm64 # or whatever
+export GOARCH=arm64 # or, ya know, whatever
 export CGO_ENABLED=1
 ```
-- Build all the things:
+- Build the profiler:
 ```sh
 # Linux only; requires clang/llvm and kernel headers
 go mod download
 go generate ./pkg/profiler            # builds the BPF object via bpf2go (emits files under pkg/profiler with tag ebpf_build)
-go build ./cmd/server                 # HTTP service
-go build ./cmd/traffic                # traffic generator
 go build -tags ebpf_build ./cmd/profiler  # profiler binary (uses generated bindings)
 ```
 
 ## Run 'dis mofo:
 - You can run the profiler first, and it'll hang out waiting for any HTTP traffic to arrive via `syscall`:
 ```sh
-sudo OUTPUT_PATH="/some/path/ebpf_http_profiler.log" ./profiler # sudo because eBPF? I guess?
+# sudo because eBPF? I guess?
+sudo OUTPUT_PATH="/some/path/ebpf_http_profiler.log" ./profiler 
 ```
 - Then stand up the demo HTTP server and traffic generator in OCI containers:
 ```sh
@@ -54,7 +70,8 @@ docker compose up -d
 # podman compose up -d
 # nerdctl compose up -d
 ```
-- The profiler captures all HTTP traffic (both client and server side) from any process on the system. The traffic generator issues GET/POST traffic in a loop so you can see request/response bodies, methods, URLs, and status codes captured from syscall payloads.
+
+The profiler captures all HTTP traffic (both client and server side) from any process on the system. The traffic generator issues GET/POST traffic in a loop so you can see request/response bodies, methods, URLs, and status codes captured from syscall payloads.
 
 ## Go Big(-ish)
 
@@ -90,4 +107,5 @@ JSON lines with syscall-derived metadata and parsed HTTP fields:
   "raw_payload": "GET /echo HTTP/1.1\r\nHost: ..."
 }
 ```
+
 Fields include parsed HTTP method, URL, status code (for responses), headers, request/response bodies, plus the complete raw payload from the syscalls. Only HTTP traffic is logged; UDP and non-HTTP TCP traffic is filtered out.
