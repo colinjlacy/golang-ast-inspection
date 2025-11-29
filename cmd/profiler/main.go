@@ -14,8 +14,9 @@ import (
 func main() {
 	port := uint16(envAsInt("HTTP_PORT", 8080))
 	output := envOrDefault("OUTPUT_PATH", "/var/log/ebpf_http_profiler.log")
+	envOutput := envOrDefault("ENV_OUTPUT_PATH", "/var/log/ebpf_http_env.yaml")
 
-	if err := profiler.NewRunner(port, output).Run(context.Background()); err != nil {
+	if err := profiler.NewRunner(port, output, envOutput).Run(context.Background()); err != nil {
 		log.Fatalf("profiler failed: %v", err)
 	}
 }

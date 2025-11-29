@@ -74,12 +74,82 @@ type HTTPEvent struct {
 }
 
 type Runner struct {
-	targetPort uint16
-	outputPath string
+	targetPort    uint16
+	outputPath    string
+	envOutputPath string
+	seenPIDs      map[uint32]bool
 }
 
-func NewRunner(port uint16, outputPath string) *Runner {
-	return &Runner{targetPort: port, outputPath: outputPath}
+func NewRunner(port uint16, outputPath string, envOutputPath string) *Runner {
+	return &Runner{
+		targetPort:    port,
+		outputPath:    outputPath,
+		envOutputPath: envOutputPath,
+		seenPIDs:      make(map[uint32]bool),
+	}
+}
+
+func (r *Runner) collectAndWriteEnv(pid uint32, envFile *os.File) {
+	// Check if we've already collected this PID
+	if r.seenPIDs[pid] {
+		return
+	}
+	r.seenPIDs[pid] = true
+
+	// Read environment variables from /proc/<pid>/environ
+	environPath := fmt.Sprintf("/proc/%d/environ", pid)
+	data, err := os.ReadFile(environPath)
+
+	// Write YAML document separator (except for first document)
+	if len(r.seenPIDs) > 1 {
+		fmt.Fprintf(envFile, "---\n")
+	}
+
+	fmt.Fprintf(envFile, "pid: %d\n", pid)
+
+	if err != nil {
+		// Handle error case
+		fmt.Fprintf(envFile, "error: \"%v\"\n", err)
+		envFile.Sync()
+		return
+	}
+
+	if len(data) == 0 {
+		fmt.Fprintf(envFile, "env: {}\n")
+		envFile.Sync()
+		return
+	}
+
+	// Parse environ file (null-separated key=value pairs)
+	envVars := make(map[string]string)
+	parts := strings.Split(string(data), "\x00")
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		// Split on first '=' to get key and value
+		idx := strings.Index(part, "=")
+		if idx > 0 {
+			key := part[:idx]
+			value := part[idx+1:]
+			envVars[key] = value
+		}
+	}
+
+	// Write env vars as YAML
+	fmt.Fprintf(envFile, "env:\n")
+	if len(envVars) == 0 {
+		fmt.Fprintf(envFile, "  {}\n")
+	} else {
+		for key, value := range envVars {
+			// Escape quotes and newlines in value
+			escapedValue := strings.ReplaceAll(value, "\\", "\\\\")
+			escapedValue = strings.ReplaceAll(escapedValue, "\"", "\\\"")
+			escapedValue = strings.ReplaceAll(escapedValue, "\n", "\\n")
+			fmt.Fprintf(envFile, "  %s: \"%s\"\n", key, escapedValue)
+		}
+	}
+	envFile.Sync()
 }
 
 func (r *Runner) Run(ctx context.Context) error {
@@ -163,7 +233,14 @@ func (r *Runner) Run(ctx context.Context) error {
 	writer := bufio.NewWriter(outFile)
 	defer writer.Flush()
 
+	envFile, err := os.OpenFile(r.envOutputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("open env output file: %w", err)
+	}
+	defer envFile.Close()
+
 	log.Printf("profiler attached, filtering for port %d, writing to %s", r.targetPort, r.outputPath)
+	log.Printf("environment variables will be written to %s", r.envOutputPath)
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
@@ -200,6 +277,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		if !isHTTPTraffic(ev, parsed) {
 			continue
 		}
+
+		// Collect environment variables for new PIDs
+		r.collectAndWriteEnv(ev.Pid, envFile)
 
 		jsonLine, err := r.formatEventJSON(ev, parsed)
 		if err != nil {
