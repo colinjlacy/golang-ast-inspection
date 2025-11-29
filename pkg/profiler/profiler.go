@@ -77,14 +77,16 @@ type Runner struct {
 	targetPort    uint16
 	outputPath    string
 	envOutputPath string
+	envPrefixes   []string
 	seenPIDs      map[uint32]bool
 }
 
-func NewRunner(port uint16, outputPath string, envOutputPath string) *Runner {
+func NewRunner(port uint16, outputPath string, envOutputPath string, envPrefixes []string) *Runner {
 	return &Runner{
 		targetPort:    port,
 		outputPath:    outputPath,
 		envOutputPath: envOutputPath,
+		envPrefixes:   envPrefixes,
 		seenPIDs:      make(map[uint32]bool),
 	}
 }
@@ -132,6 +134,21 @@ func (r *Runner) collectAndWriteEnv(pid uint32, envFile *os.File) {
 		if idx > 0 {
 			key := part[:idx]
 			value := part[idx+1:]
+
+			// Filter by prefix if prefixes are specified
+			if len(r.envPrefixes) > 0 {
+				hasPrefix := false
+				for _, prefix := range r.envPrefixes {
+					if strings.HasPrefix(key, prefix) {
+						hasPrefix = true
+						break
+					}
+				}
+				if !hasPrefix {
+					continue
+				}
+			}
+
 			envVars[key] = value
 		}
 	}

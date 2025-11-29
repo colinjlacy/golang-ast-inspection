@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/colinjlacy/golang-ast-inspection/pkg/profiler"
 )
@@ -16,7 +17,18 @@ func main() {
 	output := envOrDefault("OUTPUT_PATH", "/var/log/ebpf_http_profiler.log")
 	envOutput := envOrDefault("ENV_OUTPUT_PATH", "/var/log/ebpf_http_env.yaml")
 
-	if err := profiler.NewRunner(port, output, envOutput).Run(context.Background()); err != nil {
+	// Parse comma-separated prefix list
+	var envPrefixes []string
+	if prefixList := os.Getenv("ENV_PREFIX_LIST"); prefixList != "" {
+		for _, prefix := range strings.Split(prefixList, ",") {
+			trimmed := strings.TrimSpace(prefix)
+			if trimmed != "" {
+				envPrefixes = append(envPrefixes, trimmed)
+			}
+		}
+	}
+
+	if err := profiler.NewRunner(port, output, envOutput, envPrefixes).Run(context.Background()); err != nil {
 		log.Fatalf("profiler failed: %v", err)
 	}
 }
