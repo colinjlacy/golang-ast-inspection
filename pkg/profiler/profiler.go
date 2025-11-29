@@ -103,6 +103,24 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := attachTracepoint("syscalls", "sys_exit_recvfrom", objs.TraceSysExitRecvfrom); err != nil {
 		return fmt.Errorf("attach sys_exit_recvfrom: %w", err)
 	}
+	if err := attachTracepoint("syscalls", "sys_enter_write", objs.TraceSysEnterWrite); err != nil {
+		return fmt.Errorf("attach sys_enter_write: %w", err)
+	}
+	if err := attachTracepoint("syscalls", "sys_enter_read", objs.TraceSysEnterRead); err != nil {
+		return fmt.Errorf("attach sys_enter_read: %w", err)
+	}
+	if err := attachTracepoint("syscalls", "sys_exit_read", objs.TraceSysExitRead); err != nil {
+		return fmt.Errorf("attach sys_exit_read: %w", err)
+	}
+	if err := attachTracepoint("syscalls", "sys_enter_sendmsg", objs.TraceSysEnterSendmsg); err != nil {
+		return fmt.Errorf("attach sys_enter_sendmsg: %w", err)
+	}
+	if err := attachTracepoint("syscalls", "sys_enter_recvmsg", objs.TraceSysEnterRecvmsg); err != nil {
+		return fmt.Errorf("attach sys_enter_recvmsg: %w", err)
+	}
+	if err := attachTracepoint("syscalls", "sys_exit_recvmsg", objs.TraceSysExitRecvmsg); err != nil {
+		return fmt.Errorf("attach sys_exit_recvmsg: %w", err)
+	}
 
 	defer func() {
 		for _, l := range links {
