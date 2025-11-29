@@ -53,12 +53,31 @@ sudo OUTPUT_PATH="/some/path/ebpf_http_profiler.log" ./profiler # sudo because e
 ```sh
 TOTAL_REQUESTS=10 ./traffic
 ```
-- The profiler filters on `HTTP_PORT` (default `8080`) and writes to `/output/ebpf_http.log` inside the container, mapped to `./output/ebpf_http.log` on the host.
-- The traffic generator issues GET/POST traffic in a loop so you can see request/response bodies, methods, URLs, and status codes captured from syscall payloads.
+- The profiler captures all HTTP traffic (both client and server side) from any process on the system. The traffic generator issues GET/POST traffic in a loop so you can see request/response bodies, methods, URLs, and status codes captured from syscall payloads.
 
 ## Output format
-Plain text lines with syscall-derived metadata and parsed HTTP hints:
+JSON lines with syscall-derived metadata and parsed HTTP fields:
+```json
+{
+  "timestamp": "2024-04-08T18:24:10.123456789Z",
+  "pid": 1234,
+  "comm": "traffic-generat",
+  "cmdline": "/bin/traffic-generator",
+  "direction": "send",
+  "source_ip": "127.0.0.1",
+  "source_port": 54321,
+  "dest_ip": "127.0.0.1",
+  "dest_port": 8080,
+  "bytes": 89,
+  "method": "GET",
+  "url": "/echo",
+  "body": "{\"message\":\"hello\"}",
+  "headers": {
+    "Host": "127.0.0.1:8080",
+    "User-Agent": "Go-http-client/1.1",
+    "Content-Type": "application/json"
+  },
+  "raw_payload": "GET /echo HTTP/1.1\r\nHost: ..."
+}
 ```
-ts=2024-04-08T18:24:10.123Z pid=1234 comm=curl dir=send src=127.0.0.1:57532 dst=127.0.0.1:8080 bytes=89 method=GET url=/echo body="" raw="GET /echo HTTP/1.1\r\nHost: ..."
-```
-Fields include URL, method, status (when parsing responses), request/response bodies (truncated), plus raw payload slices from the send/recv syscalls.
+Fields include parsed HTTP method, URL, status code (for responses), headers, request/response bodies, plus the complete raw payload from the syscalls. Only HTTP traffic is logged; UDP and non-HTTP TCP traffic is filtered out.

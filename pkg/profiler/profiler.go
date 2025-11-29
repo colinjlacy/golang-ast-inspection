@@ -5,6 +5,7 @@ package profiler
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -50,6 +51,26 @@ type Parsed struct {
 	URL        string
 	Body       string
 	StatusCode string
+	Headers    map[string]string
+}
+
+type HTTPEvent struct {
+	Timestamp  string            `json:"timestamp"`
+	PID        uint32            `json:"pid"`
+	Comm       string            `json:"comm"`
+	Cmdline    string            `json:"cmdline"`
+	Direction  string            `json:"direction"`
+	SourceIP   string            `json:"source_ip"`
+	SourcePort uint16            `json:"source_port"`
+	DestIP     string            `json:"dest_ip"`
+	DestPort   uint16            `json:"dest_port"`
+	Bytes      uint32            `json:"bytes"`
+	Method     string            `json:"method,omitempty"`
+	URL        string            `json:"url,omitempty"`
+	StatusCode string            `json:"status_code,omitempty"`
+	Body       string            `json:"body,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	RawPayload string            `json:"raw_payload,omitempty"`
 }
 
 type Runner struct {
@@ -172,19 +193,24 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 
 		ev := (*Event)(unsafe.Pointer(&record.RawSample[0]))
-		// if !r.portMatches(ev) {
-		// 	log.Printf("event not for target port, skipping")
-		// 	continue
-		// }
 
 		parsed := parseHTTP(ev)
-		line := r.formatEvent(ev, parsed)
-		log.Printf("writing line: %s", line)
-		if _, err := writer.WriteString(line + "\n"); err != nil {
+
+		// Filter: only output if we successfully parsed HTTP data
+		if !isHTTPTraffic(ev, parsed) {
+			continue
+		}
+
+		jsonLine, err := r.formatEventJSON(ev, parsed)
+		if err != nil {
+			log.Printf("error formatting event: %v", err)
+			continue
+		}
+
+		if _, err := writer.WriteString(jsonLine + "\n"); err != nil {
 			log.Printf("error writing line: %v", err)
 			return fmt.Errorf("write log: %w", err)
 		}
-		log.Printf("flushed writer")
 		writer.Flush()
 
 		select {
@@ -210,7 +236,7 @@ func (r *Runner) portMatches(ev *Event) bool {
 	return ntohs(ev.Sport) == r.targetPort || ntohs(ev.Dport) == r.targetPort
 }
 
-func (r *Runner) formatEvent(ev *Event, parsed Parsed) string {
+func (r *Runner) formatEventJSON(ev *Event, parsed Parsed) (string, error) {
 	dir := "send"
 	if ev.Direction == dirRecv {
 		dir = "recv"
@@ -219,7 +245,7 @@ func (r *Runner) formatEvent(ev *Event, parsed Parsed) string {
 	dport := ntohs(ev.Dport)
 	saddr := ipFromBytes(ev.Family, ev.Saddr[:])
 	daddr := ipFromBytes(ev.Family, ev.Daddr[:])
-	payload := strings.TrimSpace(string(ev.Data[:ev.DataLen]))
+	payload := string(ev.Data[:ev.DataLen])
 
 	// Lookup the command line for the process using /proc/<pid>/cmdline
 	cmdline := ""
@@ -234,31 +260,30 @@ func (r *Runner) formatEvent(ev *Event, parsed Parsed) string {
 		cmdline = "[cmdline empty]"
 	}
 
-	var parts []string
-	parts = append(parts, fmt.Sprintf("ts=%s", time.Unix(0, int64(ev.Ts)).Format(time.RFC3339Nano)))
-	parts = append(parts, fmt.Sprintf("pid=%d", ev.Pid))
-	parts = append(parts, fmt.Sprintf("comm=%s", strings.Trim(string(ev.Comm[:]), "\x00")))
-	parts = append(parts, fmt.Sprintf("cmdline=%q", cmdline))
-	parts = append(parts, fmt.Sprintf("dir=%s", dir))
-	parts = append(parts, fmt.Sprintf("src=%s:%d", saddr, sport))
-	parts = append(parts, fmt.Sprintf("dst=%s:%d", daddr, dport))
-	parts = append(parts, fmt.Sprintf("bytes=%d", ev.DataLen))
-
-	if parsed.Method != "" {
-		parts = append(parts, fmt.Sprintf("method=%s", parsed.Method))
-	}
-	if parsed.URL != "" {
-		parts = append(parts, fmt.Sprintf("url=%s", parsed.URL))
-	}
-	if parsed.StatusCode != "" {
-		parts = append(parts, fmt.Sprintf("status=%s", parsed.StatusCode))
-	}
-	if parsed.Body != "" {
-		parts = append(parts, fmt.Sprintf("body=%s", parsed.Body))
+	event := HTTPEvent{
+		Timestamp:  time.Unix(0, int64(ev.Ts)).Format(time.RFC3339Nano),
+		PID:        ev.Pid,
+		Comm:       strings.Trim(string(ev.Comm[:]), "\x00"),
+		Cmdline:    cmdline,
+		Direction:  dir,
+		SourceIP:   saddr.String(),
+		SourcePort: sport,
+		DestIP:     daddr.String(),
+		DestPort:   dport,
+		Bytes:      ev.DataLen,
+		Method:     parsed.Method,
+		URL:        parsed.URL,
+		StatusCode: parsed.StatusCode,
+		Body:       parsed.Body,
+		Headers:    parsed.Headers,
+		RawPayload: payload,
 	}
 
-	parts = append(parts, fmt.Sprintf("raw=%q", payload))
-	return strings.Join(parts, " ")
+	jsonBytes, err := json.Marshal(event)
+	if err != nil {
+		return "", err
+	}
+	return string(jsonBytes), nil
 }
 
 func parseHTTP(ev *Event) Parsed {
@@ -266,23 +291,55 @@ func parseHTTP(ev *Event) Parsed {
 	data := ev.Data[:ev.DataLen]
 	text := string(data)
 
-	if ev.Direction == dirSend {
+	// Try to parse as HTTP response first (starts with "HTTP/")
+	if strings.HasPrefix(text, "HTTP/1.") || strings.HasPrefix(text, "HTTP/2") {
+		parts := strings.SplitN(text, " ", 3)
+		if len(parts) >= 2 {
+			out.StatusCode = strings.TrimSpace(parts[1])
+		}
+		out.Body = extractBody(text)
+		out.Headers = extractHeaders(text)
+	} else {
+		// Try to parse as HTTP request (starts with method)
 		fields := strings.Fields(text)
 		if len(fields) >= 2 && isHTTPMethod(fields[0]) {
 			out.Method = fields[0]
 			out.URL = fields[1]
 			out.Body = extractBody(text)
-		}
-	} else {
-		if strings.HasPrefix(text, "HTTP/1.") || strings.HasPrefix(text, "HTTP/2") {
-			parts := strings.SplitN(text, " ", 3)
-			if len(parts) >= 2 {
-				out.StatusCode = strings.TrimSpace(parts[1])
-			}
-			out.Body = extractBody(text)
+			out.Headers = extractHeaders(text)
 		}
 	}
 	return out
+}
+
+func extractHeaders(payload string) map[string]string {
+	headers := make(map[string]string)
+	parts := strings.SplitN(payload, "\r\n\r\n", 2)
+	if len(parts) < 1 {
+		return headers
+	}
+
+	lines := strings.Split(parts[0], "\r\n")
+	// Skip the first line (request/response line)
+	for i := 1; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		// Parse header: "Key: Value"
+		colonIdx := strings.Index(line, ":")
+		if colonIdx > 0 {
+			key := strings.TrimSpace(line[:colonIdx])
+			value := strings.TrimSpace(line[colonIdx+1:])
+			headers[key] = value
+		}
+	}
+	return headers
+}
+
+func isHTTPTraffic(ev *Event, parsed Parsed) bool {
+	// Check if we parsed HTTP data successfully (either request or response)
+	return parsed.Method != "" || parsed.StatusCode != ""
 }
 
 func extractBody(payload string) string {

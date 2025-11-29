@@ -346,11 +346,6 @@ int trace_sys_enter_sendto(struct sys_enter_args *ctx)
         maybe_update_conn_from_addr(key, dest_addr, true);
     }
 
-    struct conn_info *info = lookup_conn(pid, fd);
-    if (!info) {
-        return 0;
-    }
-
     __u32 copy_len = len > MAX_DATA_SIZE ? MAX_DATA_SIZE : (__u32)len;
 
     struct http_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
@@ -364,7 +359,12 @@ int trace_sys_enter_sendto(struct sys_enter_args *ctx)
     e->direction = DIR_SEND;
     e->data_len = copy_len;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
-    fill_event_conn(e, info);
+    
+    // Try to get connection info, but emit event even if not available
+    struct conn_info *info = lookup_conn(pid, fd);
+    if (info) {
+        fill_event_conn(e, info);
+    }
 
     bpf_probe_read_user(&e->data, copy_len, buf);
     bpf_ringbuf_submit(e, 0);
@@ -415,11 +415,6 @@ int trace_sys_exit_recvfrom(struct sys_exit_args *ctx)
     }
     bpf_map_delete_elem(&recv_args_map, &pid_tgid);
 
-    struct conn_info *info = lookup_conn(pid, args->fd);
-    if (!info) {
-        return 0;
-    }
-
     __u32 copy_len = ret > MAX_DATA_SIZE ? MAX_DATA_SIZE : (__u32)ret;
 
     struct http_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
@@ -433,7 +428,12 @@ int trace_sys_exit_recvfrom(struct sys_exit_args *ctx)
     e->direction = DIR_RECV;
     e->data_len = copy_len;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
-    fill_event_conn(e, info);
+    
+    // Try to get connection info, but emit event even if not available
+    struct conn_info *info = lookup_conn(pid, args->fd);
+    if (info) {
+        fill_event_conn(e, info);
+    }
 
     void *src_buf = (void *)(unsigned long)args->buf;
     bpf_probe_read_user(&e->data, copy_len, src_buf);
@@ -454,11 +454,6 @@ int trace_sys_enter_write(struct sys_enter_args *ctx)
     void *buf = (void *)ctx->args[1];
     size_t len = (size_t)ctx->args[2];
 
-    struct conn_info *info = lookup_conn(pid, fd);
-    if (!info) {
-        return 0;
-    }
-
     __u32 copy_len = len > MAX_DATA_SIZE ? MAX_DATA_SIZE : (__u32)len;
 
     struct http_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
@@ -472,7 +467,12 @@ int trace_sys_enter_write(struct sys_enter_args *ctx)
     e->direction = DIR_SEND;
     e->data_len = copy_len;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
-    fill_event_conn(e, info);
+    
+    // Try to get connection info, but emit event even if not available
+    struct conn_info *info = lookup_conn(pid, fd);
+    if (info) {
+        fill_event_conn(e, info);
+    }
 
     bpf_probe_read_user(&e->data, copy_len, buf);
     bpf_ringbuf_submit(e, 0);
@@ -516,11 +516,6 @@ int trace_sys_exit_read(struct sys_exit_args *ctx)
     }
     bpf_map_delete_elem(&recv_args_map, &pid_tgid);
 
-    struct conn_info *info = lookup_conn(pid, args->fd);
-    if (!info) {
-        return 0;
-    }
-
     __u32 copy_len = ret > MAX_DATA_SIZE ? MAX_DATA_SIZE : (__u32)ret;
 
     struct http_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
@@ -534,7 +529,12 @@ int trace_sys_exit_read(struct sys_exit_args *ctx)
     e->direction = DIR_RECV;
     e->data_len = copy_len;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
-    fill_event_conn(e, info);
+    
+    // Try to get connection info, but emit event even if not available
+    struct conn_info *info = lookup_conn(pid, args->fd);
+    if (info) {
+        fill_event_conn(e, info);
+    }
 
     void *src_buf = (void *)(unsigned long)args->buf;
     bpf_probe_read_user(&e->data, copy_len, src_buf);

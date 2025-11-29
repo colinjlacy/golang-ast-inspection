@@ -10,32 +10,6 @@ services:
     ports:
       - "8080:8080"
 
-  profiler:
-    build:
-      context: .
-      dockerfile: ./cmd/profiler/Dockerfile
-    environment:
-      - HTTP_PORT=8080
-      - OUTPUT_PATH=/output/ebpf_http.log
-    # privileged: true
-    cap_add:
-      - IPC_LOCK
-      - SYS_RESOURCE
-      - SYS_ADMIN
-      - BPF
-    security_opt:
-      - seccomp=unconfined
-      - apparmor=unconfined
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-    pid: host
-    volumes:
-      - ./output:/output
-    depends_on:
-      - http-service
-
   traffic:
     build:
       context: .
@@ -43,7 +17,7 @@ services:
     environment:
       - TARGET_HOST=http-service
       - HTTP_PORT=8080
-      - TOTAL_REQUESTS=50
+      - TOTAL_REQUESTS=10
       - REQUEST_DELAY_MS=500
     depends_on:
       - http-service
