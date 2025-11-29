@@ -46,10 +46,13 @@ go build -tags ebpf_build ./cmd/profiler  # profiler binary (uses generated bind
 ## Run 'dis mofo:
 - You can run the server or the profiler first, doesn't really matter which:
 ```sh
-sudo ./profiler # because eBPF? I guess?
+sudo OUTPUT_PATH="/some/path/ebpf_http_profiler.log" ./profiler # sudo because eBPF? I guess?
 ./server
 ```
-- With both of those running, you can start sending traffic 
+- With both of those running, you can start sending traffic:
+```sh
+TOTAL_REQUESTS=10 ./traffic
+```
 - The profiler filters on `HTTP_PORT` (default `8080`) and writes to `/output/ebpf_http.log` inside the container, mapped to `./output/ebpf_http.log` on the host.
 - The traffic generator issues GET/POST traffic in a loop so you can see request/response bodies, methods, URLs, and status codes captured from syscall payloads.
 

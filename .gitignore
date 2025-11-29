@@ -3,3 +3,6 @@ output/*
 pkg/profiler/profiler_bpf*
 .DS_Store
 .idea/
+profiler
+server
+traffic
