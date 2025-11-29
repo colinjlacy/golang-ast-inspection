@@ -44,16 +44,26 @@ go build -tags ebpf_build ./cmd/profiler  # profiler binary (uses generated bind
 ```
 
 ## Run 'dis mofo:
-- You can run the server or the profiler first, doesn't really matter which:
+- You can run the profiler first, and it'll hang out waiting for any HTTP traffic to arrive via `syscall`:
 ```sh
 sudo OUTPUT_PATH="/some/path/ebpf_http_profiler.log" ./profiler # sudo because eBPF? I guess?
-./server
 ```
-- With both of those running, you can start sending traffic:
+- Then stand up the demo HTTP server and traffic generator in OCI containers:
 ```sh
-TOTAL_REQUESTS=10 ./traffic
+docker compose up -d
+# podman compose up -d
+# nerdctl compose up -d
 ```
 - The profiler captures all HTTP traffic (both client and server side) from any process on the system. The traffic generator issues GET/POST traffic in a loop so you can see request/response bodies, methods, URLs, and status codes captured from syscall payloads.
+
+## Go Big(-ish)
+
+I've got [another repo](https://github.com/colinjlacy/bookinfo-docker-compose) that put the [Istio Bookinfo](https://github.com/colinjlacy/bookinfo-docker-compose) demo into a docker-compose file. 
+
+You can:
+- run the profiler in this repo
+- stand up the containers in that repo
+- and then run that repo's `run-traffic-gen.sh` to profile traffic happening between all of the different services
 
 ## Output format
 JSON lines with syscall-derived metadata and parsed HTTP fields:
