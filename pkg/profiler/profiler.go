@@ -79,8 +79,10 @@ type Runner struct {
 	envOutputPath     string
 	envPrefixes       []string
 	adiProfileAllowed []string
-	seenPIDs          map[uint32]bool
+	seenPIDs          map[uint32]string // stores cmdline for each PID
 	pidAdiProfiles    map[uint32]string // stores ADI_PROFILE value for each PID
+	pidNames          map[uint32]string // stores ADI_PROFILE_NAME value for each PID
+	writtenPIDs       map[uint32]bool   // tracks which PIDs have been written to YAML
 }
 
 func NewRunner(port uint16, outputPath string, envOutputPath string, envPrefixes []string, adiProfileAllowed []string) *Runner {
@@ -90,22 +92,25 @@ func NewRunner(port uint16, outputPath string, envOutputPath string, envPrefixes
 		envOutputPath:     envOutputPath,
 		envPrefixes:       envPrefixes,
 		adiProfileAllowed: adiProfileAllowed,
-		seenPIDs:          make(map[uint32]bool),
+		seenPIDs:          make(map[uint32]string),
 		pidAdiProfiles:    make(map[uint32]string),
+		pidNames:          make(map[uint32]string),
+		writtenPIDs:       make(map[uint32]bool),
 	}
 }
 
-func (r *Runner) shouldProfilePID(pid uint32) (bool, string) {
+func (r *Runner) shouldProfilePID(pid uint32) (bool, string, string) {
 	// Read environment variables from /proc/<pid>/environ
 	environPath := fmt.Sprintf("/proc/%d/environ", pid)
 	data, err := os.ReadFile(environPath)
 	if err != nil {
 		// Process may have exited, skip silently
-		return false, ""
+		return false, "", ""
 	}
 
-	// Parse environ file to find ADI_PROFILE and ADI_PROFILE_DISABLED
+	// Parse environ file to find ADI_PROFILE, ADI_PROFILE_DISABLED, and ADI_PROFILE_NAME
 	var adiProfile string
+	var adiProfileName string
 	var adiProfileDisabled bool
 
 	parts := strings.Split(string(data), "\x00")
@@ -122,6 +127,8 @@ func (r *Runner) shouldProfilePID(pid uint32) (bool, string) {
 				adiProfile = value
 			} else if key == "ADI_PROFILE_DISABLED" && value == "1" {
 				adiProfileDisabled = true
+			} else if key == "ADI_PROFILE_NAME" {
+				adiProfileName = value
 			}
 		}
 	}
@@ -129,12 +136,12 @@ func (r *Runner) shouldProfilePID(pid uint32) (bool, string) {
 	// Check opt-in criteria
 	// 1. ADI_PROFILE_DISABLED must not be set
 	if adiProfileDisabled {
-		return false, ""
+		return false, "", ""
 	}
 
 	// 2. ADI_PROFILE must be present
 	if adiProfile == "" {
-		return false, ""
+		return false, "", ""
 	}
 
 	// 3. If ADI_PROFILE_ALLOWED is set, value must be in the list
@@ -147,35 +154,47 @@ func (r *Runner) shouldProfilePID(pid uint32) (bool, string) {
 			}
 		}
 		if !allowed {
-			return false, ""
+			return false, "", ""
 		}
 	}
 
 	// All checks passed
-	return true, adiProfile
+	return true, adiProfile, adiProfileName
 }
 
 func (r *Runner) collectAndWriteEnv(pid uint32, envFile *os.File) {
-	// Check if we've already collected this PID
-	if r.seenPIDs[pid] {
+	// Check if we've already written this PID
+	if r.writtenPIDs[pid] {
 		return
 	}
-	r.seenPIDs[pid] = true
+	r.writtenPIDs[pid] = true
 
 	// Read environment variables from /proc/<pid>/environ
 	environPath := fmt.Sprintf("/proc/%d/environ", pid)
 	data, err := os.ReadFile(environPath)
 
-	// Write YAML document separator (except for first document)
-	if len(r.seenPIDs) > 1 {
-		fmt.Fprintf(envFile, "---\n")
-	}
+	// Write YAML document separator
+	fmt.Fprintf(envFile, "---\n")
 
-	fmt.Fprintf(envFile, "pid: %d\n", pid)
+	fmt.Fprintf(envFile, "adi_profile_pid: %d\n", pid)
 
 	// Add ADI_PROFILE value if we have it
 	if adiProfileValue, ok := r.pidAdiProfiles[pid]; ok {
 		fmt.Fprintf(envFile, "adi_profile_match: \"%s\"\n", adiProfileValue)
+	}
+
+	// Add ADI_PROFILE_NAME as "adi_profile_name" if we have it
+	if name, ok := r.pidNames[pid]; ok {
+		fmt.Fprintf(envFile, "adi_profile_name: \"%s\"\n", name)
+	}
+
+	// Add adi_profile_cmdline from the stored value
+	if cmdline, ok := r.seenPIDs[pid]; ok {
+		// Escape quotes and newlines in cmdline
+		escapedCmdline := strings.ReplaceAll(cmdline, "\\", "\\\\")
+		escapedCmdline = strings.ReplaceAll(escapedCmdline, "\"", "\\\"")
+		escapedCmdline = strings.ReplaceAll(escapedCmdline, "\n", "\\n")
+		fmt.Fprintf(envFile, "adi_profile_cmdline: \"%s\"\n", escapedCmdline)
 	}
 
 	if err != nil {
@@ -186,7 +205,7 @@ func (r *Runner) collectAndWriteEnv(pid uint32, envFile *os.File) {
 	}
 
 	if len(data) == 0 {
-		fmt.Fprintf(envFile, "env: {}\n")
+		fmt.Fprintf(envFile, "adi_profile_env: {}\n")
 		envFile.Sync()
 		return
 	}
@@ -365,15 +384,34 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 
 		// Check opt-in criteria for new PIDs
-		if !r.seenPIDs[ev.Pid] {
-			shouldProfile, adiProfileValue := r.shouldProfilePID(ev.Pid)
+		if _, seen := r.seenPIDs[ev.Pid]; !seen {
+			shouldProfile, adiProfileValue, adiProfileName := r.shouldProfilePID(ev.Pid)
+
+			// Read cmdline once for this PID
+			cmdline := ""
+			cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", ev.Pid)
+			if data, err := os.ReadFile(cmdlinePath); err == nil && len(data) > 0 {
+				// /proc/<pid>/cmdline is null-separated. Replace with spaces and trim
+				cmdline = strings.ReplaceAll(string(data), "\x00", " ")
+				cmdline = strings.TrimSpace(cmdline)
+			} else if err != nil {
+				cmdline = fmt.Sprintf("[cmdline error: %v]", err)
+			} else {
+				cmdline = "[cmdline empty]"
+			}
+
 			if !shouldProfile {
 				// Silently skip this PID - it doesn't meet opt-in criteria
-				r.seenPIDs[ev.Pid] = true // Mark as seen so we don't check again
+				r.seenPIDs[ev.Pid] = cmdline // Mark as seen with cmdline so we don't check again
 				continue
 			}
-			// Store the ADI_PROFILE value for this PID
+
+			// Store the cmdline, ADI_PROFILE value, and ADI_PROFILE_NAME for this PID
+			r.seenPIDs[ev.Pid] = cmdline
 			r.pidAdiProfiles[ev.Pid] = adiProfileValue
+			if adiProfileName != "" {
+				r.pidNames[ev.Pid] = adiProfileName
+			}
 		} else {
 			// For already-seen PIDs, check if they passed opt-in
 			if _, hasProfile := r.pidAdiProfiles[ev.Pid]; !hasProfile {
@@ -431,18 +469,8 @@ func (r *Runner) formatEventJSON(ev *Event, parsed Parsed) (string, error) {
 	daddr := ipFromBytes(ev.Family, ev.Daddr[:])
 	payload := string(ev.Data[:ev.DataLen])
 
-	// Lookup the command line for the process using /proc/<pid>/cmdline
-	cmdline := ""
-	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", ev.Pid)
-	if data, err := os.ReadFile(cmdlinePath); err == nil && len(data) > 0 {
-		// /proc/<pid>/cmdline is null-separated. Replace with spaces and trim
-		cmdline = strings.ReplaceAll(string(data), "\x00", " ")
-		cmdline = strings.TrimSpace(cmdline)
-	} else if err != nil {
-		cmdline = fmt.Sprintf("[cmdline error: %v]", err)
-	} else {
-		cmdline = "[cmdline empty]"
-	}
+	// Get the stored cmdline for this PID
+	cmdline := r.seenPIDs[ev.Pid]
 
 	event := HTTPEvent{
 		Timestamp:  time.Unix(0, int64(ev.Ts)).Format(time.RFC3339Nano),
