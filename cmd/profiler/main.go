@@ -28,7 +28,18 @@ func main() {
 		}
 	}
 
-	if err := profiler.NewRunner(port, output, envOutput, envPrefixes).Run(context.Background()); err != nil {
+	// Parse comma-separated ADI_PROFILE allowed values
+	var adiProfileAllowed []string
+	if allowedList := os.Getenv("ADI_PROFILE_ALLOWED"); allowedList != "" {
+		for _, allowed := range strings.Split(allowedList, ",") {
+			trimmed := strings.TrimSpace(allowed)
+			if trimmed != "" {
+				adiProfileAllowed = append(adiProfileAllowed, trimmed)
+			}
+		}
+	}
+
+	if err := profiler.NewRunner(port, output, envOutput, envPrefixes, adiProfileAllowed).Run(context.Background()); err != nil {
 		log.Fatalf("profiler failed: %v", err)
 	}
 }

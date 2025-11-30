@@ -74,21 +74,85 @@ type HTTPEvent struct {
 }
 
 type Runner struct {
-	targetPort    uint16
-	outputPath    string
-	envOutputPath string
-	envPrefixes   []string
-	seenPIDs      map[uint32]bool
+	targetPort        uint16
+	outputPath        string
+	envOutputPath     string
+	envPrefixes       []string
+	adiProfileAllowed []string
+	seenPIDs          map[uint32]bool
+	pidAdiProfiles    map[uint32]string // stores ADI_PROFILE value for each PID
 }
 
-func NewRunner(port uint16, outputPath string, envOutputPath string, envPrefixes []string) *Runner {
+func NewRunner(port uint16, outputPath string, envOutputPath string, envPrefixes []string, adiProfileAllowed []string) *Runner {
 	return &Runner{
-		targetPort:    port,
-		outputPath:    outputPath,
-		envOutputPath: envOutputPath,
-		envPrefixes:   envPrefixes,
-		seenPIDs:      make(map[uint32]bool),
+		targetPort:        port,
+		outputPath:        outputPath,
+		envOutputPath:     envOutputPath,
+		envPrefixes:       envPrefixes,
+		adiProfileAllowed: adiProfileAllowed,
+		seenPIDs:          make(map[uint32]bool),
+		pidAdiProfiles:    make(map[uint32]string),
 	}
+}
+
+func (r *Runner) shouldProfilePID(pid uint32) (bool, string) {
+	// Read environment variables from /proc/<pid>/environ
+	environPath := fmt.Sprintf("/proc/%d/environ", pid)
+	data, err := os.ReadFile(environPath)
+	if err != nil {
+		// Process may have exited, skip silently
+		return false, ""
+	}
+
+	// Parse environ file to find ADI_PROFILE and ADI_PROFILE_DISABLED
+	var adiProfile string
+	var adiProfileDisabled bool
+
+	parts := strings.Split(string(data), "\x00")
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		idx := strings.Index(part, "=")
+		if idx > 0 {
+			key := part[:idx]
+			value := part[idx+1:]
+
+			if key == "ADI_PROFILE" {
+				adiProfile = value
+			} else if key == "ADI_PROFILE_DISABLED" && value == "1" {
+				adiProfileDisabled = true
+			}
+		}
+	}
+
+	// Check opt-in criteria
+	// 1. ADI_PROFILE_DISABLED must not be set
+	if adiProfileDisabled {
+		return false, ""
+	}
+
+	// 2. ADI_PROFILE must be present
+	if adiProfile == "" {
+		return false, ""
+	}
+
+	// 3. If ADI_PROFILE_ALLOWED is set, value must be in the list
+	if len(r.adiProfileAllowed) > 0 {
+		allowed := false
+		for _, allowedValue := range r.adiProfileAllowed {
+			if adiProfile == allowedValue {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false, ""
+		}
+	}
+
+	// All checks passed
+	return true, adiProfile
 }
 
 func (r *Runner) collectAndWriteEnv(pid uint32, envFile *os.File) {
@@ -108,6 +172,11 @@ func (r *Runner) collectAndWriteEnv(pid uint32, envFile *os.File) {
 	}
 
 	fmt.Fprintf(envFile, "pid: %d\n", pid)
+
+	// Add ADI_PROFILE value if we have it
+	if adiProfileValue, ok := r.pidAdiProfiles[pid]; ok {
+		fmt.Fprintf(envFile, "adi_profile_match: \"%s\"\n", adiProfileValue)
+	}
 
 	if err != nil {
 		// Handle error case
@@ -293,6 +362,24 @@ func (r *Runner) Run(ctx context.Context) error {
 		// Filter: only output if we successfully parsed HTTP data
 		if !isHTTPTraffic(ev, parsed) {
 			continue
+		}
+
+		// Check opt-in criteria for new PIDs
+		if !r.seenPIDs[ev.Pid] {
+			shouldProfile, adiProfileValue := r.shouldProfilePID(ev.Pid)
+			if !shouldProfile {
+				// Silently skip this PID - it doesn't meet opt-in criteria
+				r.seenPIDs[ev.Pid] = true // Mark as seen so we don't check again
+				continue
+			}
+			// Store the ADI_PROFILE value for this PID
+			r.pidAdiProfiles[ev.Pid] = adiProfileValue
+		} else {
+			// For already-seen PIDs, check if they passed opt-in
+			if _, hasProfile := r.pidAdiProfiles[ev.Pid]; !hasProfile {
+				// This PID was previously rejected
+				continue
+			}
 		}
 
 		// Collect environment variables for new PIDs

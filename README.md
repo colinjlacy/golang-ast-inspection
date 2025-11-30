@@ -16,7 +16,7 @@ It's a PoC in the service of [this initiative](https://github.com/cncf/toc/issue
 - For each PID found, pulls the environment variables assigned to the process
 - Writes the output of each to an output file
 
-I'll probably keep adding stuff. Please feel free to contribute or make suggestions.
+Please feel free to make suggestions, either here or in the initiative's [Slack discussion](https://cloud-native.slack.com/archives/C09S7A5T3GF).
 
 ## System compatibility 
 
@@ -72,74 +72,122 @@ go generate ./pkg/profiler            # builds the BPF object via bpf2go (emits 
 go build -tags ebpf_build ./cmd/profiler  # profiler binary (uses generated bindings)
 ```
 
-## Environment Variables:
+## Environment Variables
 
-There are currently three envirnment variables that you can optionally set, listed below with their default values:
+### Profiler Configuration
 
-- `OUTPUT_PATH=/var/log/ebpf_http_profiler.log` indicates the file path to which logged HTTP events will be written
-- `ENV_OUTPUT_PATH=/var/log/ebpf_http_env.yaml` indicates where the 
-- `ENV_PREFIX_LIST=""` is a comma-separated list (see below for an example) of environment variable prefixes to filter the env var firehose.
+These environment variables configure the profiler itself:
 
-## Run 'dis mofo:
+- `OUTPUT_PATH=/var/log/ebpf_http_profiler.log` - File path for HTTP event logs (JSON format)
+- `ENV_OUTPUT_PATH=/var/log/ebpf_http_env.yaml` - File path for environment variable logs (YAML format)
+- `ENV_PREFIX_LIST=""` - Comma-separated list of environment variable key prefixes to include (case-sensitive). If not set, all environment variables are collected.
+- `ADI_PROFILE_ALLOWED=""` - Comma-separated list of ADI_PROFILE values to profile (see Opt-In Profiling below). If not set, all processes with `ADI_PROFILE` set (any value) will be profiled.
 
-- You can run the profiler first, and it'll hang out waiting for any HTTP traffic to arrive via `syscall`:
+### Opt-In Profiling
+
+The profiler uses an opt-in system to control which processes are profiled. Target processes (the ones being profiled) must set specific environment variables:
+
+**Target Process Environment Variables:**
+- `ADI_PROFILE=<environment>` - **Required for profiling.** Indicates the process opts into profiling. The value should indicate the environment (e.g., `local`, `dev`, `staging`, `prod`).
+- `ADI_PROFILE_DISABLED=1` - **Override to disable profiling.** If set, the process will not be profiled even if `ADI_PROFILE` is present.
+
+**Profiling Logic:**
+
+A process is profiled only if:
+1. `ADI_PROFILE_DISABLED` is **not** set to `1`
+2. `ADI_PROFILE` **is** set
+3. If `ADI_PROFILE_ALLOWED` is set on the profiler, the `ADI_PROFILE` value must be in the allowed list
+
+**Default Behavior:**
+- If `ADI_PROFILE_ALLOWED` is **not set**: All processes with `ADI_PROFILE` set (any value) are profiled
+- If `ADI_PROFILE_ALLOWED` **is set**: Only processes whose `ADI_PROFILE` value matches one in the list are profiled
+- Processes without `ADI_PROFILE` are **never** profiled
+
+**Example Scenarios:**
+
+| Target Process Has | Profiler Config | Result |
+|-------------------|-----------------|---------|
+| `ADI_PROFILE=local` | `ADI_PROFILE_ALLOWED=""` (not set) | ✅ Profiled |
+| `ADI_PROFILE=local` | `ADI_PROFILE_ALLOWED="local,dev"` | ✅ Profiled |
+| `ADI_PROFILE=prod` | `ADI_PROFILE_ALLOWED="local,dev"` | ❌ Not profiled |
+| `ADI_PROFILE=local`<br>`ADI_PROFILE_DISABLED=1` | `ADI_PROFILE_ALLOWED="local"` | ❌ Not profiled (override) |
+| (no ADI_PROFILE) | `ADI_PROFILE_ALLOWED="local"` | ❌ Not profiled |
+
+## Run 'dis mofo
+
+### Basic Usage
+
+**Step 1: Start the profiler**
+
+Profile all processes with `ADI_PROFILE` set (any value), get the full environment variable map for each process:
 ```sh
-# sudo because eBPF? I guess?
 sudo OUTPUT_PATH="/some/path/ebpf_http_profiler.log" \
-  ENV_OUTPUT_PATH="/some/path/ebpf_env_profiler.yaml" \
-  ENV_PREFIX_LIST="HTTP_,TARGET_,TOTAL_,REQUEST_" \
- ./profiler 
+     ENV_OUTPUT_PATH="/some/path/ebpf_env_profiler.yaml" \
+     ./profiler
 ```
-- Then stand up the demo HTTP server and traffic generator in OCI containers:
+
+Profile only specific processes that have `ADI_PROFILE=local` or `ADI_PROFILE=dev` set, still get the full environment variable map for each process:
+```sh
+sudo OUTPUT_PATH="/some/path/ebpf_http_profiler.log" \
+     ENV_OUTPUT_PATH="/some/path/ebpf_env_profiler.yaml" \
+     ADI_PROFILE_ALLOWED="local,dev" \
+     ./profiler
+```
+
+Profile with environment variable filtering:
+```sh
+sudo OUTPUT_PATH="/some/path/ebpf_http_profiler.log" \
+     ENV_OUTPUT_PATH="/some/path/ebpf_env_profiler.yaml" \
+     ENV_PREFIX_LIST="REVIEWS_,RATINGS_,MONGO_" \
+     ADI_PROFILE_ALLOWED="local,dev,staging" \
+     ./profiler
+```
+
+**Step 2: Start services with opt-in flag**
+
+For the demo HTTP server and traffic generator, `ADI_PROFILE=local` has already been set in `docker-compose.yml`. Run them both with:
 ```sh
 docker compose up -d
 # podman compose up -d
 # nerdctl compose up -d
 ```
 
-The profiler captures all HTTP traffic (both client and server side) from any process on the system. The traffic generator issues GET/POST traffic in a loop so you can see request/response bodies, methods, URLs, and status codes captured from syscall payloads.
-
-### Environment Variable Collection
+The profiler captures all HTTP traffic (both client and server side) from processes that meet the opt-in criteria. The traffic generator issues GET/POST traffic in a loop so you can see request/response bodies, methods, URLs, and status codes captured from syscall payloads.
 
 The profiler also collects environment variables from each process making HTTP calls. As soon as a new PID is observed, the profiler reads `/proc/<pid>/environ` and writes the results to a separate YAML file.
 
-**Configuration:**
-- `ENV_OUTPUT_PATH`: Path to the YAML output file (default: `/var/log/ebpf_http_env.yaml`)
-- `ENV_PREFIX_LIST`: Comma-separated list of prefixes to filter environment variables (optional)
-
-**Examples:**
-
-Collect all environment variables:
-```sh
-sudo OUTPUT_PATH="/some/path/ebpf_http_profiler.log" \
-     ENV_OUTPUT_PATH="/some/path/ebpf_http_env.yaml" \
-     ./profiler
-```
-
-Collect only environment variables with specific prefixes (case-sensitive):
-```sh
-sudo OUTPUT_PATH="/some/path/ebpf_http_profiler.log" \
-     ENV_OUTPUT_PATH="/some/path/ebpf_http_env.yaml" \
-     ENV_PREFIX_LIST="REVIEWS_,RATINGS_,MONGO_" \
-     ./profiler
-```
+You can run the profiler first, and it'll hang out waiting for 
+any HTTP traffic to arrive via `syscall`. Or, if you start it while processes are sending traffic, it will profile for as long as it's running.
 
 ## Go Big(-ish)
 
-I've got [another repo](https://github.com/colinjlacy/bookinfo-docker-compose) that put the [Istio Bookinfo](https://github.com/colinjlacy/bookinfo-docker-compose) demo into a docker-compose file. 
+I've got [another repo](https://github.com/colinjlacy/bookinfo-docker-compose) that puts the [Istio Bookinfo](https://github.com/colinjlacy/bookinfo-docker-compose) demo into a docker-compose file. 
 
-You can:
-- run the profiler in this repo:
+To profile the Bookinfo services:
+
+**Step 1: Start the profiler with environment-specific filtering**
+
 ```sh
 sudo OUTPUT_PATH="/home/lima.linux/http-profiler/output/ebpf_http_profiler.log" \
-  ENV_OUTPUT_PATH="/home/lima.linux/http-profiler/output/ebpf_env_profiler.yaml" \
-  ENV_PREFIX_LIST="REVIEWS_,RATINGS_,MONGO_,DETAILS_" 
-  ./profiler 
+     ENV_OUTPUT_PATH="/home/lima.linux/http-profiler/output/ebpf_env_profiler.yaml" \
+     ENV_PREFIX_LIST="REVIEWS_,RATINGS_,MONGO_,DETAILS_" \
+     ADI_PROFILE_ALLOWED="local,dev" \
+     ./profiler
 ```
-- stand up the containers in that repo
-- and then run that repo's `run-traffic-gen.sh` to profile traffic happening between all of the different services
 
-You'll notice that because you added env var prefix filters you don't get all of the env vars that the OCI runtime sets. Try it again without setting `ENV_PREFIX_LIST` to see the full OCI env var firehose.
+**Step 2: Start the services and run traffic**
+
+From the other repo's project root:
+```sh
+docker compose up -d
+# podman compose up -d
+# nerdctl compose up -d
+./scripts/run-traffic-gen.sh
+```
+
+The profiler will capture HTTP traffic and environment variables from all services that have `ADI_PROFILE=local` or `ADI_PROFILE=dev` set. Because you specified `ENV_PREFIX_LIST`, you'll only see the filtered environment variables (not the full OCI runtime environment). Try it without `ENV_PREFIX_LIST` to see the full environment variable firehose.
+
+Note that the NodeJS traffic generator app was not profiled at all, due to the fact that it does not have `ADI_PROFILE` set.
 
 ## Output format
 
@@ -175,6 +223,7 @@ Fields include parsed HTTP method, URL, status code (for responses), headers, re
 Multi-document YAML with one document per PID:
 ```yaml
 pid: 12345
+adi_profile: "local"
 env:
   PATH: "/usr/local/bin:/usr/bin:/bin"
   HOME: "/home/user"
@@ -182,12 +231,20 @@ env:
   RATINGS_HOSTNAME: "ratings"
 ---
 pid: 67890
+adi_profile: "staging"
 env:
   MONGO_HOST: "mongodb://db:27017"
   MONGO_DATABASE: "bookinfo"
 ---
 pid: 99999
+adi_profile: "local"
 error: "open /proc/99999/environ: no such file or directory"
 ```
 
-Each document includes the PID and its environment variables as key-value pairs. If a process exits before the profiler can read its environment, an error message is recorded instead. When `ENV_PREFIX_LIST` is used, only matching environment variables are included (PIDs may have empty `env: {}` if no variables match).
+Each document includes:
+- `pid`: The process ID
+- `adi_profile_match`: The value of the `ADI_PROFILE` environment variable that qualified this process for profiling
+- `env`: Key-value pairs of environment variables (filtered by `ENV_PREFIX_LIST` if specified)
+- `error`: Error message if the process exits before the profiler can read its environment
+
+When `ENV_PREFIX_LIST` is used, only matching environment variables are included (PIDs may have empty `env: {}` if no variables match).
