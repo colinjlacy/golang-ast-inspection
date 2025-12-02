@@ -522,23 +522,17 @@ func (r *Runner) formatEventJSON(ev *Event, parsed Parsed) (string, error) {
 	// Enrich with container metadata if resolver is available
 	if r.containerResolver != nil {
 		// Resolve source container from PID
-		log.Printf("debug: attempting to resolve source PID %d", ev.Pid)
 		if srcMeta := r.containerResolver.ResolvePIDToContainer(ev.Pid); srcMeta != nil {
-			log.Printf("debug: resolved source PID %d to container %s (service: %s)", ev.Pid, srcMeta.ContainerName, srcMeta.Service)
 			event.SourceContainer = &ContainerInfo{
 				Service:       srcMeta.Service,
 				Image:         fmt.Sprintf("%s:%s", srcMeta.Image, srcMeta.ImageTag),
 				ContainerID:   srcMeta.ContainerID,
 				ContainerName: srcMeta.ContainerName,
 			}
-		} else {
-			log.Printf("debug: could not resolve source PID %d to container", ev.Pid)
 		}
 
 		// Resolve destination container from IP:port
-		log.Printf("debug: attempting to resolve destination %s:%d", daddr.String(), dport)
 		if dstMeta := r.containerResolver.ResolveDestination(daddr, dport); dstMeta != nil {
-			log.Printf("debug: resolved destination %s:%d to container %s (service: %s)", daddr.String(), dport, dstMeta.ContainerName, dstMeta.Service)
 			event.DestinationContainer = &ContainerInfo{
 				Service:       dstMeta.Service,
 				Image:         fmt.Sprintf("%s:%s", dstMeta.Image, dstMeta.ImageTag),
@@ -547,12 +541,9 @@ func (r *Runner) formatEventJSON(ev *Event, parsed Parsed) (string, error) {
 			}
 			event.DestinationType = "container"
 		} else {
-			log.Printf("debug: could not resolve destination %s:%d to container (external)", daddr.String(), dport)
 			// External destination
 			event.DestinationType = "external"
 		}
-	} else {
-		log.Printf("debug: container resolver is nil, skipping enrichment")
 	}
 
 	jsonBytes, err := json.Marshal(event)

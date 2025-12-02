@@ -180,29 +180,19 @@ func (r *ContainerResolver) indexContainer(container containerd.Container) error
 
 	// Approach 1: Check nerdctl-specific labels
 	if ipStr := labels["nerdctl/networks"]; ipStr != "" {
-		log.Printf("debug: found nerdctl/networks label: %s", ipStr)
 		r.parseNetworkIPs(ipStr, meta)
 	}
 
 	// Approach 2: Check CNI network info from labels
 	if ipStr := labels["nerdctl/ip-address"]; ipStr != "" {
-		log.Printf("debug: found nerdctl/ip-address label: %s", ipStr)
 		if ip, err := netip.ParseAddr(ipStr); err == nil {
 			meta.IPAddresses = append(meta.IPAddresses, ip)
 			r.ipToContainer[ip] = meta
 		}
 	}
 
-	// Approach 3: Parse from extraHosts or other network labels
-	for key, value := range labels {
-		if strings.Contains(key, "network") || strings.Contains(key, "ip") {
-			log.Printf("debug: found network-related label %s: %s", key, value)
-		}
-	}
-
 	// Extract port mappings from labels
 	if portsStr := labels["nerdctl/ports"]; portsStr != "" {
-		log.Printf("debug: found nerdctl/ports label: %s", portsStr)
 		r.parsePortMappings(portsStr, meta)
 	}
 
@@ -226,44 +216,24 @@ func (r *ContainerResolver) indexContainer(container containerd.Container) error
 
 	// Read IPs directly from the task's network namespace
 	taskPID := task.Pid()
-	log.Printf("debug: indexContainer: task PID for %s is %d", container.ID()[:12], taskPID)
 	if taskPID > 0 {
 		r.readIPsFromTaskNetNS(taskPID, meta)
-	} else {
-		log.Printf("debug: indexContainer: skipping IP extraction for %s (no task PID)", container.ID()[:12])
 	}
-
-	log.Printf("debug: container %s (%s) indexed with %d IPs", container.ID()[:12], meta.ContainerName, len(meta.IPAddresses))
 
 	return nil
 }
 
 // readIPsFromTaskNetNS reads IP addresses from a task's network namespace via /proc
 func (r *ContainerResolver) readIPsFromTaskNetNS(pid uint32, meta *ContainerMetadata) {
-	log.Printf("debug: readIPsFromTaskNetNS: starting for PID %d", pid)
-
 	// Read IPv4 addresses from /proc/<pid>/net/fib_trie
 	fibPath := fmt.Sprintf("/proc/%d/net/fib_trie", pid)
 	fibData, err := readFile(fibPath)
 	if err != nil {
-		log.Printf("debug: readIPsFromTaskNetNS: failed to read %s: %v", fibPath, err)
 		return
 	}
 
-	log.Printf("debug: readIPsFromTaskNetNS: read %d bytes from %s", len(fibData), fibPath)
-
 	lines := strings.Split(string(fibData), "\n")
 
-	// DEBUG: Show first 10 lines to understand the format
-	log.Printf("debug: readIPsFromTaskNetNS: First 10 lines of fib_trie for PID %d:", pid)
-	for i, line := range lines {
-		if i >= 10 {
-			break
-		}
-		log.Printf("debug:   line %d: %s", i, line)
-	}
-
-	foundIPs := 0
 	for i := 0; i < len(lines)-1; i++ {
 		line := lines[i]
 		nextLine := lines[i+1]
@@ -277,29 +247,19 @@ func (r *ContainerResolver) readIPsFromTaskNetNS(pid uint32, meta *ContainerMeta
 				if ip, err := netip.ParseAddr(field); err == nil {
 					// Check if next line indicates this is a host address
 					if strings.Contains(nextLine, "/32") && (strings.Contains(nextLine, "host") || strings.Contains(nextLine, "LOCAL")) {
-						// Skip loopback
+						// Skip loopback and only add private IPs
 						if !ip.IsLoopback() && ip.Is4() {
 							// Ensure we only add private IPs (10.x, 172.16-31.x, 192.168.x)
 							octets := ip.As4()
 							if octets[0] == 10 || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) || (octets[0] == 192 && octets[1] == 168) {
 								meta.IPAddresses = append(meta.IPAddresses, ip)
 								r.ipToContainer[ip] = meta
-								foundIPs++
-								log.Printf("debug: extracted IP %s from task PID %d (container: %s)", ip.String(), pid, meta.ContainerName)
-							} else {
-								log.Printf("debug: skipping non-private IP %s from PID %d", ip.String(), pid)
 							}
-						} else if ip.IsLoopback() {
-							log.Printf("debug: skipping loopback IP %s from PID %d", ip.String(), pid)
 						}
 					}
 				}
 			}
 		}
-	}
-
-	if foundIPs == 0 {
-		log.Printf("debug: readIPsFromTaskNetNS: no IPs found for PID %d, tried parsing %d lines", pid, len(lines))
 	}
 }
 
@@ -398,26 +358,20 @@ func (r *ContainerResolver) ResolveDestination(destIP netip.Addr, destPort uint1
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	log.Printf("debug: ResolveDestination: looking up %s:%d (have %d IPs in index, %d port mappings)",
-		destIP.String(), destPort, len(r.ipToContainer), len(r.hostPortToContainer))
-
 	// First, try direct IP lookup (container-to-container)
 	if meta := r.ipToContainer[destIP]; meta != nil {
-		log.Printf("debug: ResolveDestination: found via direct IP lookup")
 		return meta
 	}
 
 	// Next, try host port mapping (calls via published ports)
 	key := fmt.Sprintf("%s:%d", destIP.String(), destPort)
 	if meta := r.hostPortToContainer[key]; meta != nil {
-		log.Printf("debug: ResolveDestination: found via host port mapping")
 		return meta
 	}
 
 	// Also check 0.0.0.0 bindings
 	key = fmt.Sprintf("0.0.0.0:%d", destPort)
 	if meta := r.hostPortToContainer[key]; meta != nil {
-		log.Printf("debug: ResolveDestination: found via 0.0.0.0 binding")
 		return meta
 	}
 
@@ -425,18 +379,8 @@ func (r *ContainerResolver) ResolveDestination(destIP netip.Addr, destPort uint1
 	if destIP.IsLoopback() {
 		key = fmt.Sprintf("127.0.0.1:%d", destPort)
 		if meta := r.hostPortToContainer[key]; meta != nil {
-			log.Printf("debug: ResolveDestination: found via 127.0.0.1 binding")
 			return meta
 		}
-	}
-
-	// Debug: show what IPs we have
-	if len(r.ipToContainer) > 0 && len(r.ipToContainer) <= 10 {
-		ips := make([]string, 0, len(r.ipToContainer))
-		for ip := range r.ipToContainer {
-			ips = append(ips, ip.String())
-		}
-		log.Printf("debug: ResolveDestination: IPs in index: %v", ips)
 	}
 
 	return nil
@@ -447,18 +391,14 @@ func (r *ContainerResolver) ResolvePIDToContainer(pid uint32) *ContainerMetadata
 	cgroupPath := fmt.Sprintf("/proc/%d/cgroup", pid)
 	data, err := readFile(cgroupPath)
 	if err != nil {
-		log.Printf("debug: ResolvePIDToContainer: failed to read cgroup for PID %d: %v", pid, err)
 		return nil
 	}
 
 	// Parse cgroup to extract container ID
 	containerID := extractContainerIDFromCgroup(string(data))
 	if containerID == "" {
-		log.Printf("debug: ResolvePIDToContainer: could not extract container ID from cgroup for PID %d, cgroup content: %s", pid, string(data)[:min(len(data), 200)])
 		return nil
 	}
-
-	log.Printf("debug: ResolvePIDToContainer: extracted container ID %s from PID %d", containerID[:min(len(containerID), 12)], pid)
 
 	// Look up container by ID
 	r.mu.RLock()
@@ -466,19 +406,16 @@ func (r *ContainerResolver) ResolvePIDToContainer(pid uint32) *ContainerMetadata
 
 	// Direct lookup by container ID
 	if meta, ok := r.containerIDToMeta[containerID]; ok {
-		log.Printf("debug: ResolvePIDToContainer: matched PID %d to container %s", pid, meta.ContainerName)
 		return meta
 	}
 
 	// Try partial match (in case we only got a short ID)
 	for fullID, meta := range r.containerIDToMeta {
 		if strings.HasPrefix(fullID, containerID) {
-			log.Printf("debug: ResolvePIDToContainer: matched PID %d to container %s via prefix", pid, meta.ContainerName)
 			return meta
 		}
 	}
 
-	log.Printf("debug: ResolvePIDToContainer: container ID %s not found in index (have %d containers indexed)", containerID[:min(len(containerID), 12)], len(r.containerIDToMeta))
 	return nil
 }
 
