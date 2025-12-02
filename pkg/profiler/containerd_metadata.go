@@ -226,44 +226,80 @@ func (r *ContainerResolver) indexContainer(container containerd.Container) error
 
 	// Read IPs directly from the task's network namespace
 	taskPID := task.Pid()
+	log.Printf("debug: indexContainer: task PID for %s is %d", container.ID()[:12], taskPID)
 	if taskPID > 0 {
 		r.readIPsFromTaskNetNS(taskPID, meta)
+	} else {
+		log.Printf("debug: indexContainer: skipping IP extraction for %s (no task PID)", container.ID()[:12])
 	}
 
-	log.Printf("debug: container %s indexed with %d IPs", container.ID()[:12], len(meta.IPAddresses))
+	log.Printf("debug: container %s (%s) indexed with %d IPs", container.ID()[:12], meta.ContainerName, len(meta.IPAddresses))
 
 	return nil
 }
 
 // readIPsFromTaskNetNS reads IP addresses from a task's network namespace via /proc
 func (r *ContainerResolver) readIPsFromTaskNetNS(pid uint32, meta *ContainerMetadata) {
+	log.Printf("debug: readIPsFromTaskNetNS: starting for PID %d", pid)
+
 	// Read IPv4 addresses from /proc/<pid>/net/fib_trie
 	fibPath := fmt.Sprintf("/proc/%d/net/fib_trie", pid)
-	if fibData, err := readFile(fibPath); err == nil {
-		lines := strings.Split(string(fibData), "\n")
-		for _, line := range lines {
-			// Look for lines like:  |-- 10.4.1.55/32 host LOCAL
-			if strings.Contains(line, "/32") && (strings.Contains(line, "host") || strings.Contains(line, "LOCAL")) {
-				fields := strings.Fields(line)
-				for _, field := range fields {
-					if strings.Contains(field, "/32") {
-						ipStr := strings.TrimSuffix(field, "/32")
-						if ip, err := netip.ParseAddr(ipStr); err == nil {
-							// Skip loopback
-							if !ip.IsLoopback() && ip.Is4() {
-								// Ensure we only add private IPs (10.x, 172.16-31.x, 192.168.x)
-								octets := ip.As4()
-								if octets[0] == 10 || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) || (octets[0] == 192 && octets[1] == 168) {
-									meta.IPAddresses = append(meta.IPAddresses, ip)
-									r.ipToContainer[ip] = meta
-									log.Printf("debug: extracted IP %s from task PID %d", ip.String(), pid)
-								}
+	fibData, err := readFile(fibPath)
+	if err != nil {
+		log.Printf("debug: readIPsFromTaskNetNS: failed to read %s: %v", fibPath, err)
+		return
+	}
+
+	log.Printf("debug: readIPsFromTaskNetNS: read %d bytes from %s", len(fibData), fibPath)
+
+	lines := strings.Split(string(fibData), "\n")
+
+	// DEBUG: Show first 10 lines to understand the format
+	log.Printf("debug: readIPsFromTaskNetNS: First 10 lines of fib_trie for PID %d:", pid)
+	for i, line := range lines {
+		if i >= 10 {
+			break
+		}
+		log.Printf("debug:   line %d: %s", i, line)
+	}
+
+	foundIPs := 0
+	for i := 0; i < len(lines)-1; i++ {
+		line := lines[i]
+		nextLine := lines[i+1]
+
+		// Look for lines with IP addresses like:  |-- 10.4.1.49
+		// followed by a line like:                   /32 host LOCAL
+		if strings.Contains(line, "|--") {
+			fields := strings.Fields(line)
+			for _, field := range fields {
+				// Try to parse as IP address
+				if ip, err := netip.ParseAddr(field); err == nil {
+					// Check if next line indicates this is a host address
+					if strings.Contains(nextLine, "/32") && (strings.Contains(nextLine, "host") || strings.Contains(nextLine, "LOCAL")) {
+						// Skip loopback
+						if !ip.IsLoopback() && ip.Is4() {
+							// Ensure we only add private IPs (10.x, 172.16-31.x, 192.168.x)
+							octets := ip.As4()
+							if octets[0] == 10 || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) || (octets[0] == 192 && octets[1] == 168) {
+								meta.IPAddresses = append(meta.IPAddresses, ip)
+								r.ipToContainer[ip] = meta
+								foundIPs++
+								log.Printf("debug: extracted IP %s from task PID %d (container: %s)", ip.String(), pid, meta.ContainerName)
+							} else {
+								log.Printf("debug: skipping non-private IP %s from PID %d", ip.String(), pid)
 							}
+						} else if ip.IsLoopback() {
+							log.Printf("debug: skipping loopback IP %s from PID %d", ip.String(), pid)
 						}
 					}
 				}
 			}
 		}
+	}
+
+	if foundIPs == 0 {
+		log.Printf("debug: readIPsFromTaskNetNS: no IPs found for PID %d, tried parsing %d lines", pid, len(lines))
 	}
 }
 
